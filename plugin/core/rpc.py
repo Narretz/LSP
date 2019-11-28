@@ -80,6 +80,8 @@ class Client(object):
         self._sync_request_results = {}  # type: Dict[int, Optional[Any]]
         self._sync_request_lock = Lock()
         self._sync_request_cvar = Condition(self._sync_request_lock)
+        self._sync_requesting = False
+        self._incoming_payloads = []
         self.exiting = False
         self._crash_handler = None  # type: Optional[Callable]
         self._transport_fail_handler = None  # type: Optional[Callable]
@@ -94,7 +96,7 @@ class Client(object):
     ) -> 'None':
         self.request_id += 1
         if self.transport is not None:
-            debug(' --> ' + request.method)
+            debug(str(self.request_id) + ' --> ' + request.method)
             self._response_handlers[self.request_id] = (handler, error_handler)
             self.send_payload(request.to_payload(self.request_id))
         else:
@@ -111,19 +113,22 @@ class Client(object):
             debug('unable to send', request.method)
             return None
 
-        debug(' ==> ' + request.method)
         self.request_id += 1
         request_id = self.request_id
+        debug(str(request_id) + ' ==> ' + request.method)
         self.send_payload(request.to_payload(request_id))
         result = None
-        try:
-            with self._sync_request_cvar:
-                # We go to sleep. We wake up once another thread calls .notify() on this condition variable.
-                self._sync_request_cvar.wait_for(lambda: request_id in self._sync_request_results, timeout)
-                result = self._sync_request_results.pop(request_id)
-        except KeyError as e:
-            debug('timeout on', request.method)
-            return None
+        self._sync_requesting = True
+
+        with self._sync_request_cvar:
+            # We go to sleep. We wake up once another thread calls .notify() on this condition variable.
+            debug('waiting...')
+            got_reply = self._sync_request_cvar.wait(timeout)
+            # self._sync_request_cvar.wait_for(lambda: request_id in self._sync_request_results, timeout)
+            result = self._sync_request_results.pop(request_id, None)
+            debug('replied? {}, result: {}'.format(got_reply, result))
+        self._sync_requesting = False
+
         return result
 
     def send_notification(self, notification: Notification) -> None:
@@ -174,10 +179,22 @@ class Client(object):
 
         try:
             if "method" in payload:
-                if "id" in payload:
-                    self.handle("request", payload, self._request_handlers, payload.get("id"))
+                if self._sync_requesting:
+                    debug('stashing ', payload["method"])
+                    self._incoming_payloads.append(payload)
                 else:
-                    self.handle("notification", payload, self._notification_handlers)
+                    while self._incoming_payloads:
+                        old_payload = self._incoming_payloads.pop()
+                        debug('releasing', old_payload["method"])
+                        if "id" in old_payload:
+                            self.handle("request", old_payload, self._request_handlers, old_payload.get("id"))
+                        else:
+                            self.handle("notification", old_payload, self._notification_handlers)
+
+                    if "id" in payload:
+                        self.handle("request", payload, self._request_handlers, payload.get("id"))
+                    else:
+                        self.handle("notification", payload, self._notification_handlers)
             elif "id" in payload:
                 self.response_handler(payload)
             else:
@@ -196,7 +213,7 @@ class Client(object):
         # because of the usage of the condition variable below.
         request_id = int(response["id"])
         if self.settings.log_payloads:
-            debug('     ' + str(response.get("result", None)))
+            debug(str(request_id) + '     ' + str(response.get("result", None)))
         handler, error_handler = self._response_handlers.pop(request_id, (None, None))
         if "result" in response and "error" not in response:
             if handler:
