@@ -115,6 +115,15 @@ class LspFormatDocumentCommand(LspTextCommand):
             client.send_request(request, lambda response: apply_response_to_view(response, self.view))
 
 
+class LspEditAndSaveCommand(LspTextCommand):
+    def __init__(self, view: sublime.View) -> None:
+        super().__init__(view)
+
+    def run(self, edit: sublime.Edit) -> None:
+        self.view.insert(edit, self.view.sel()[0].begin(), " ")
+        sublime.set_timeout_async(lambda: self.view.run_command("save"), 0)
+
+
 class LspFormatDocumentRangeCommand(LspTextCommand):
     def __init__(self, view: sublime.View) -> None:
         super().__init__(view)
